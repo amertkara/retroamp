@@ -1,0 +1,6 @@
+# Build output: the app and Swift's module cache
+build/
+
+# Local tool and editor state
+.claude/
+.DS_Store
