@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var timers: [Timer] = []
     private var playingSince: TimeInterval?
     private var tapHintShown = false
+    private var tapFailHintShown = false
     private var skinDownload: Task<Void, Never>?
 
     enum Keys {
@@ -150,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         spotifyAppRunning = spotify.isRunning
         spotifyInstalled = spotify.isInstalled
         spotify.poll()
-        tap.maintain(spotifyRunning: spotifyAppRunning, playing: spotify.status.state == .playing)
+        tap.maintain(spotifyRunning: spotifyAppRunning)
         checkVisualizerPermission()
         playlist?.poll()
     }
@@ -166,10 +167,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         perform(#selector(pollTick), with: nil, afterDelay: 0.5)
     }
 
-    /// The tap delivers silence when System Audio Recording is denied; explain once.
+    /// The tap delivers silence when System Audio Recording is denied; explain once. If capture
+    /// keeps failing to start, show Core Audio's error once.
     private func checkVisualizerPermission() {
         let now = Self.now
-        guard tap.status == .running, spotify.status.state == .playing else { playingSince = nil; return }
+        if !tapFailHintShown, tap.failedStarts >= 3, case .failed(let err) = tap.status {
+            tapFailHintShown = true
+            let code = AudioTap.fourCC(err).map { "'\($0)'" } ?? String(err)
+            show("THE VISUALIZER CAN'T START: CORE AUDIO ERROR \(code)", seconds: 12)
+        }
+        // Spotify must be playing here, not on another Connect device, and the tap running.
+        guard tap.status == .running, tap.spotifyOutputActive, spotify.status.state == .playing else {
+            playingSince = nil
+            return
+        }
         let since = playingSince ?? now
         playingSince = since
         if !tapHintShown, now - since > 6, analyzer.secondsSinceSignal > 5 {
@@ -217,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         s.balance = balance
         s.shuffle = st.shuffle
         s.repeating = st.repeating
-        if tap.status == .running, s.playback != .stopped, tap.sampleRate > 0 { s.kHz = Int(tap.sampleRate / 1000) }
+        if s.playback != .stopped, tap.sampleRate > 0 { s.kHz = Int(tap.sampleRate / 1000) }
         s.windowActive = window.isKeyWindow
         s.alwaysOnTop = alwaysOnTop
         s.doubleSize = scale == 2

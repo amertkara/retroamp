@@ -54,15 +54,21 @@ macOS asks for these the first time they're needed:
 1. **Automation → Spotify.** This lets Retroamp read the current track and control playback.
    - If you decline, the display shows `RETROAMP NEEDS PERMISSION TO CONTROL SPOTIFY`.
    - To turn it back on, go to System Settings → Privacy & Security → Automation → Retroamp.
-2. **System Audio Recording.** This is used only to draw the visualizer. Retroamp captures only Spotify's processes, and nothing is recorded or saved.
+2. **System Audio Recording.** This is used only to draw the visualizer. Retroamp captures only Spotify's processes, only while Spotify plays on this Mac, and nothing is recorded or saved.
    - Without it, the visualizer stays flat.
-   - To turn it on, go to System Settings → Privacy & Security → Screen & System Audio Recording.
+   - To turn it on, go to System Settings → Privacy & Security → Screen & System Audio Recording, and switch Retroamp on under **System Audio Recording Only**.
 3. **Keychain.** After you connect Spotify, the sign-in is kept in your login keychain. A rebuilt app may ask to use the item "local.retroamp.spotify"; choose **Always Allow**.
 
 Each rebuild produces a new ad-hoc signature, so macOS may treat the app as new and ask again. If a permission seems stuck, reset Retroamp's permissions and reopen the app:
 
 ```sh
 tccutil reset All local.retroamp
+```
+
+If the visualizer stays flat while Spotify plays on this Mac, Retroamp's log says why:
+
+```sh
+log show --last 10m --style compact --predicate 'process == "Retroamp"'
 ```
 
 ## The main window
@@ -222,8 +228,10 @@ Modern `.wal` skins aren't supported. Retroamp remembers the skin you chose. The
   If Spotify isn't running, Retroamp opens it hidden and waits until it has signed in. If Spotify still needs a sign-in after 15 seconds, Retroamp brings its window up.
 - **Queue and playlists.** These come from the Spotify Web API: `GET /me/player/queue`, `GET /me/playlists`, `GET /playlists/{id}/items`, `GET /me/tracks` and `POST /me/player/queue`.
 - **Visualizer.**
-  - A private, unmuted Core Audio process tap captures only Spotify's audio.
-  - It feeds a private aggregate device.
+  - A private, unmuted Core Audio process tap captures only Spotify's audio. It runs only while Spotify's audio process is playing to an output, and stops 20 seconds after Spotify goes quiet.
+  - The tap is part of a private aggregate device from the start, with drift compensation, as in [AudioCap](https://github.com/insidegui/AudioCap).
+  - An output device without a microphone clocks the aggregate device: the default output, or the built-in speakers when the default output is a headset. A headset would have its microphone opened too, and a Bluetooth headset would switch to its call profile.
+  - An aggregate device that held only the tap failed to start on macOS 26 (Core Audio error `'nope'`). That layout is now only the fallback, for Macs without such an output device or where the clocked one fails.
   - A 2048-point FFT (Accelerate) is split into 19 log-spaced bands, with auto-gain and the classic falling peaks.
 - **Drawing.**
   - The windows are composed at 1× from the skin's sprite sheets and scaled with nearest-neighbour filtering: 1× by default, up to 3× by dragging the player's edge.
@@ -240,7 +248,7 @@ Modern `.wal` skins aren't supported. Retroamp remembers the skin you chose. The
 - **Liked Songs plays from a list of tracks.** Spotify doesn't officially support Liked Songs as something to play within. If the Web API refuses it, Retroamp plays up to 50 tracks, starting with the one you picked.
 - **Spotify's own DJ button can't be pressed from outside.** Spotify has no API for DJ. Retroamp starts DJ as the playlist `spotify:playlist:37i9dQZF1EYkqdzj48dyYq`, and gets different picks by starting it again from the top. Asking DJ for something specific is only possible in Spotify.
 - **Not implemented yet:** windowshade mode and the equalizer window.
-- **kbps stays blank,** because Spotify doesn't report a bitrate. kHz shows the tap's sample rate.
+- **kbps stays blank,** because Spotify doesn't report a bitrate. kHz shows the sample rate of the captured audio.
 
 ## Development
 

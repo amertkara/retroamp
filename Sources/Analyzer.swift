@@ -93,18 +93,22 @@ final class Analyzer: @unchecked Sendable {
 
     func ingest(_ list: UnsafePointer<AudioBufferList>) {
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
-        guard buffers.count > 0 else { return }
+        // The first two buffers that hold data; a stream without data comes through as a
+        // buffer with no memory or zero bytes.
+        var first: AudioBuffer?, second: AudioBuffer?
+        for b in buffers where b.mData != nil && b.mDataByteSize > 0 {
+            if first == nil { first = b } else { second = b; break }
+        }
+        guard let a = first, let ra = a.mData else { return }
         lock.lock(); defer { lock.unlock() }
         guard acceptsFloat else { return }
         let mask = capacity - 1
         var loud = false
-        if buffers.count == 1 {
-            // Interleaved: average all channels.
-            let b = buffers[0]
-            guard let raw = b.mData else { return }
-            let data = raw.assumingMemoryBound(to: Float.self)
-            let ch = max(1, Int(b.mNumberChannels))
-            let frames = Int(b.mDataByteSize) / (MemoryLayout<Float>.size * ch)
+        if a.mNumberChannels >= 2 || second == nil {
+            // Interleaved (the tap's usual stereo layout): average all channels.
+            let data = ra.assumingMemoryBound(to: Float.self)
+            let ch = max(1, Int(a.mNumberChannels))
+            let frames = Int(a.mDataByteSize) / (MemoryLayout<Float>.size * ch)
             let scale = 1 / Float(ch)
             for f in 0..<frames {
                 var s: Float = 0
@@ -114,10 +118,8 @@ final class Analyzer: @unchecked Sendable {
                 ring[writePos] = s
                 writePos = (writePos + 1) & mask
             }
-        } else {
-            // Non-interleaved: average the first two channel buffers.
-            let a = buffers[0], b = buffers[1]
-            guard let ra = a.mData, let rb = b.mData else { return }
+        } else if let b = second, let rb = b.mData {
+            // Non-interleaved: one buffer per channel. Average the first two.
             let da = ra.assumingMemoryBound(to: Float.self), db = rb.assumingMemoryBound(to: Float.self)
             let frames = Int(min(a.mDataByteSize, b.mDataByteSize)) / MemoryLayout<Float>.size
             for f in 0..<frames {

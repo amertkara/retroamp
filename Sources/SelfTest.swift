@@ -1,7 +1,9 @@
 import AppKit
+import CoreAudio
 
-/// `Retroamp --selftest`: checks the sign-in plumbing and Web API parsing without a browser or a
-/// Spotify account. The redirect listener runs on a spare port, so a running Retroamp is unaffected.
+/// `Retroamp --selftest`: checks the sign-in plumbing, Web API parsing and the visualizer without a
+/// browser, a Spotify account or audio hardware. The redirect listener runs on a spare port, so a
+/// running Retroamp is unaffected.
 @MainActor
 enum SelfTest {
     private static var failures = 0
@@ -18,6 +20,7 @@ enum SelfTest {
         parsing()
         playback()
         windowSize()
+        visualizer()
         print(failures == 0 ? "All checks passed." : "\(failures) check(s) failed.")
         return failures == 0 ? 0 : 1
     }
@@ -315,5 +318,119 @@ enum SelfTest {
               && v.resizeEdge(at: NSPoint(x: 274, y: 60)) == .right && v.resizeEdge(at: NSPoint(x: 120, y: 1)) == .bottom)
         check("title bar and the rest don't", v.resizeEdge(at: NSPoint(x: 274, y: 110)) == nil
               && v.resizeEdge(at: NSPoint(x: 200, y: 50)) == nil && v.resizeEdge(at: NSPoint(x: 260, y: 15)) == nil)
+    }
+
+    // MARK: Visualizer
+
+    private enum BufferLayout { case interleaved, perChannel, emptyFirst }
+
+    /// Feeds `chunks` blocks of 512 frames of a 1 kHz sine at -12 dBFS, at 48 kHz, in one of the
+    /// buffer layouts an IO proc can get, then draws a few frames.
+    private static func tone(_ layout: BufferLayout, chunks: Int = 12) -> Analyzer {
+        let a = Analyzer(), frames = 512, rate = 48_000.0
+        a.configure(sampleRate: rate, isFloat: true)
+        a.resetInputClock()
+        let amp = Float(pow(10, -12.0 / 20))
+        var phase = 0.0
+        for _ in 0..<chunks {
+            var mono = [Float](repeating: 0, count: frames)
+            for f in 0..<frames {
+                mono[f] = amp * Float(sin(phase))
+                phase += 2 * .pi * 1000 / rate
+            }
+            let stereo = mono.flatMap { [$0, $0] }
+            switch layout {
+            case .interleaved: feed(a, [stereo], channels: 2)
+            case .perChannel: feed(a, [mono, mono], channels: 1)
+            case .emptyFirst: feed(a, [nil, stereo], channels: 2)
+            }
+        }
+        for _ in 0..<10 { a.update(dt: 1.0 / 30) }
+        return a
+    }
+
+    /// Calls `ingest` with an AudioBufferList holding `buffers` (nil: a buffer without memory).
+    private static func feed(_ a: Analyzer, _ buffers: [[Float]?], channels: UInt32) {
+        let list = AudioBufferList.allocate(maximumBuffers: buffers.count)
+        var memory: [UnsafeMutablePointer<Float>] = []
+        for (i, samples) in buffers.enumerated() {
+            guard let samples else {
+                list[i] = AudioBuffer(mNumberChannels: channels, mDataByteSize: 0, mData: nil)
+                continue
+            }
+            let p = UnsafeMutablePointer<Float>.allocate(capacity: samples.count)
+            p.initialize(from: samples, count: samples.count)
+            memory.append(p)
+            list[i] = AudioBuffer(mNumberChannels: channels, mDataByteSize: UInt32(samples.count * 4), mData: p)
+        }
+        a.ingest(list.unsafePointer)
+        memory.forEach { $0.deallocate() }
+        free(list.unsafeMutablePointer)
+    }
+
+    private static func visualizer() {
+        let bars = { (a: Analyzer) in a.bars.map { Int($0.rounded()) } }
+        let a = tone(.interleaved)
+        let top = a.bars.indices.max { a.bars[$0] < a.bars[$1] }
+        check("a 1 kHz tone peaks in its band (937-1284 Hz)", top == 10 && a.bars[10] > 12, "\(bars(a))")
+        check("nothing at the ends of the spectrum", a.bars[0] < 4 && a.bars[18] < 4, "\(bars(a))")
+        check("the oscilloscope swings", (a.osc.max() ?? 0) - (a.osc.min() ?? 0) >= 6, "\(a.osc)")
+        check("the tone counts as signal", a.secondsSinceSignal < 1)
+        let split = tone(.perChannel)
+        check("one buffer per channel", split.bars.indices.max { split.bars[$0] < split.bars[$1] } == 10, "\(bars(split))")
+        let skipped = tone(.emptyFirst)
+        check("buffers without memory are skipped", skipped.bars.indices.max { skipped.bars[$0] < skipped.bars[$1] } == 10,
+              "\(bars(skipped))")
+
+        let quiet = Analyzer()
+        quiet.configure(sampleRate: 48_000, isFloat: true)
+        quiet.resetInputClock()
+        Thread.sleep(forTimeInterval: 0.06)
+        feed(quiet, [[Float](repeating: 0, count: 1024)], channels: 2)
+        check("silence is input but not signal", quiet.secondsSinceSignal > 0.04 && quiet.secondsSinceInput < 0.04,
+              String(format: "signal %.3f s, input %.3f s", quiet.secondsSinceSignal, quiet.secondsSinceInput))
+
+        Thread.sleep(forTimeInterval: 0.2)
+        for _ in 0..<5 { a.update(dt: 0.1) }
+        check("bars fall and the scope goes flat when input stops", a.bars.allSatisfy { $0 < 1 } && Set(a.osc).count == 1,
+              "\(bars(a)) \(a.osc)")
+
+        typealias D = AudioTap.Device
+        let speakers = D(id: 74, uid: "BuiltInSpeakerDevice", outputs: 1, transport: kAudioDeviceTransportTypeBuiltIn)
+        let mic = D(id: 80, uid: "BuiltInMicrophoneDevice", inputs: 1, transport: kAudioDeviceTransportTypeBuiltIn)
+        let display = D(id: 86, uid: "display", outputs: 1, transport: kAudioDeviceTransportTypeDisplayPort)
+        let headset = D(id: 90, uid: "headset", inputs: 1, outputs: 1, transport: kAudioDeviceTransportTypeBluetooth)
+        let multi = D(id: 95, uid: "multi", outputs: 2, transport: kAudioDeviceTransportTypeAggregate)
+        let airplay = D(id: 99, uid: "airplay", outputs: 1, transport: kAudioDeviceTransportTypeAirPlay)
+        let all = [mic, display, headset, multi, airplay, speakers]
+        func clock(_ id: AudioObjectID, _ devices: [D] = all) -> AudioObjectID? {
+            AudioTap.pickClock(defaultOutput: id, devices: devices)?.id
+        }
+        check("clock: the default output when it has no microphone", clock(86) == 86 && clock(74) == 74)
+        check("clock: built-in speakers instead of a headset's microphone", clock(90) == 74)
+        check("clock: never an aggregate device", clock(95) == 74)
+        check("clock: AirPlay only as the default output", clock(99) == 99 && clock(90, [headset, airplay]) == nil)
+        check("clock: none when every output has a microphone", clock(90, [headset, mic]) == nil)
+        var hidden = speakers, dead = display
+        hidden.hidden = true
+        dead.alive = false
+        check("clock: hidden and dead devices skipped", clock(86, [hidden, dead, headset]) == nil)
+
+        let clocked = AudioTap.aggregateDescription(tapUID: "T", clock: speakers)
+        let taps = clocked[kAudioAggregateDeviceTapListKey] as? [[String: Any]]
+        let subs = clocked[kAudioAggregateDeviceSubDeviceListKey] as? [[String: Any]]
+        check("aggregate: created with the tap, drift-compensated",
+              taps?.count == 1 && taps?[0][kAudioSubTapUIDKey] as? String == "T"
+              && taps?[0][kAudioSubTapDriftCompensationKey] as? Bool == true)
+        check("aggregate: clocked by the output device",
+              clocked[kAudioAggregateDeviceMainSubDeviceKey] as? String == speakers.uid
+              && subs?.count == 1 && subs?[0][kAudioSubDeviceUIDKey] as? String == speakers.uid)
+        let tapOnly = AudioTap.aggregateDescription(tapUID: "T", clock: nil)
+        check("aggregate: private, starts the tap, tap only without a clock",
+              tapOnly[kAudioAggregateDeviceIsPrivateKey] as? Bool == true
+              && tapOnly[kAudioAggregateDeviceTapAutoStartKey] as? Bool == true
+              && tapOnly[kAudioAggregateDeviceMainSubDeviceKey] == nil && tapOnly[kAudioAggregateDeviceSubDeviceListKey] == nil)
+        check("Core Audio errors as four-character codes", AudioTap.fourCC(1852797029) == "nope"
+              && AudioTap.describe(1852797029) == "'nope' (1852797029)" && AudioTap.fourCC(-50) == nil)
     }
 }
