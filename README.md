@@ -18,6 +18,7 @@ Retroamp puts the classic 275×116 main window and the playlist editor on top of
 - **Your Spotify library.** The playlist editor shows Spotify's queue, your playlists and Liked Songs, through the Spotify Web API.
 - **Spotify stays in the background.** Retroamp starts tracks, playlists and DJ in ways that don't bring Spotify's window to the front.
 - **Spotify DJ.** The logo at the bottom right is a DJ button. It starts DJ, or gets different picks while DJ plays.
+- **Or Apple Music.** Choose **Use Apple Music** in the options menu, and Retroamp drives the Music app instead: transport, the visualizer, and your playlists in the playlist editor (see [Apple Music](#apple-music)).
 - **Classic keyboard controls.** Z X C V B work as they always did, plus shortcuts for links, skins and DJ.
 - **No Xcode, no dependencies.** `build.sh` is a single `swiftc` call using Apple's Command Line Tools.
 
@@ -70,6 +71,21 @@ If the visualizer stays flat while Spotify plays on this Mac, Retroamp's log say
 ```sh
 log show --last 10m --style compact --predicate 'process == "Retroamp"'
 ```
+
+## Apple Music
+
+**Use Apple Music** and **Use Spotify** in the options menu switch the player app. Retroamp remembers the choice.
+
+- Music needs no sign-in. Retroamp talks to it through its AppleScript dictionary, so macOS asks for **Automation → Music** the first time.
+- The visualizer taps Music's audio the same way as Spotify's.
+- The playlist editor shows **Now Playing** (the playlist Music plays from, current track highlighted) and **Your Playlists** with their total length. Double-click a track to play it inside its playlist, or a playlist to open it. Lists are capped at 5,000 tracks.
+- Music doesn't let other apps read or change Up Next, so adding to the queue, links and DJ are Spotify only.
+
+<p align="center">
+  <img src="docs/apple-music.png" width="412" alt="Retroamp driving the Music app: the visualizer and time running, your playlists listed in the playlist editor">
+  <br>
+  <sub>Retroamp on Apple Music, track and playlist names pixelated.</sub>
+</p>
 
 ## The main window
 
@@ -263,7 +279,8 @@ The code is in `Sources/`:
 | `PlaylistWindow.swift` | Playlist editor input |
 | `PlaylistRenderer.swift`, `PlaylistLayout.swift`, `PlaylistModel.swift` | Playlist editor drawing, geometry and rows |
 | `SpotifyWebAPI.swift` | Web API client, PKCE sign-in, Keychain, loopback redirect listener |
-| `Spotify.swift` | AppleScript bridge and Spotify link parsing |
+| `Spotify.swift` | AppleScript bridge (Spotify or Music) and Spotify link parsing |
+| `MusicLibrary.swift` | Music's playlists for the playlist editor, through `osascript` |
 | `Playback.swift` | Starting tracks, playlists and DJ without raising Spotify: the Web API, `spotify_cli`, AppleScript and the focus guard |
 | `Skin.swift`, `Zip.swift`, `ClassicSkin.swift` | `.wsz` loading (in memory), the classic skin download |
 | `DefaultSkin*.swift`, `PixelCanvas.swift`, `PixelFont.swift` | The built-in skin |

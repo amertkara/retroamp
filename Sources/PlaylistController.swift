@@ -1,7 +1,8 @@
 import AppKit
 
-/// The playlist editor: what it lists (Spotify's queue, your playlists, Liked Songs), selection and
-/// scrolling, docking to the player, and what its buttons and menus do.
+/// The playlist editor: what it lists (Spotify's queue, your playlists, Liked Songs; or with Music,
+/// the playlist it plays from and your playlists), selection and scrolling, docking to the player,
+/// and what its buttons and menus do.
 @MainActor
 final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation {
     unowned let app: AppDelegate
@@ -35,6 +36,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     private var queueRefreshAt: TimeInterval?
     private var lastTrackID = ""
     private var lastMiniTime = ""
+    private var musicQueueID: String?           // the Music playlist the queue view shows
 
     static let maxEntries = 5000
 
@@ -50,6 +52,17 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     private var scale: CGFloat { app.view.scale }
     private var connecting: Bool { connectTask != nil }
+    private var music: Bool { app.backend == .music }
+
+    /// After switching between Spotify and Music: start over from the queue.
+    func backendChanged() {
+        library = nil
+        source = .queue
+        reload()
+        save()
+    }
+
+    private func label(_ s: PlaylistSource) -> String { music && s == .queue ? "NOW PLAYING" : s.label }
 
     // MARK: Window
 
@@ -78,7 +91,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
         window.initialFirstResponder = view
         window.makeFirstResponder(view)
         applyLevel()
-        setInfo(api.isConnected ? [.info(loadingText)] : PlaylistEntry.notConnected)
+        setInfo(music || api.isConnected ? [.info(loadingText)] : PlaylistEntry.notConnected)
         if isVisible { show() }
     }
 
@@ -299,10 +312,10 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     private var currentIndex: Int? {
         switch source {
-        case .queue: return queueHasCurrent && !entries.isEmpty ? 0 : nil
+        case .queue where !music: return queueHasCurrent && !entries.isEmpty ? 0 : nil
         case .library: return nil
-        case .liked, .playlist:
-            let id = app.spotify.status.trackID
+        case .queue, .liked, .playlist:
+            let id = app.player.status.trackID
             return id.isEmpty ? nil : entries.firstIndex { $0.uri == id }
         }
     }
@@ -320,10 +333,10 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     /// Sign, minutes and seconds; blinks while paused like the main display.
     private func miniTime() -> String {
-        let st = app.spotify.status
+        let st = app.player.status
         guard st.running, st.state != .stopped, st.duration > 0 else { return "" }
         if st.state == .paused, Int(AppDelegate.now * 2) % 2 == 1 { return "" }
-        let pos = app.spotify.position
+        let pos = app.player.position
         let t = Int(app.timeRemaining ? max(0, st.duration - pos) : pos)
         return (app.timeRemaining ? "-" : " ") + String(format: "%02d%02d", min(99, t / 60), t % 60)
     }
@@ -333,7 +346,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     /// 30 Hz: follows track changes and keeps the mini time current.
     func tick() {
         guard window != nil, isVisible else { return }
-        let id = app.spotify.status.trackID
+        let id = app.player.status.trackID
         if id != lastTrackID {
             lastTrackID = id
             if case .queue = source { queueRefreshAt = AppDelegate.now + 1 }
@@ -352,7 +365,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     /// Once a second: refreshes the queue every 15 seconds while it's on screen.
     func poll() {
-        guard window != nil, isVisible, case .queue = source, !loading, !suspended, !connecting, api.isConnected,
+        guard window != nil, isVisible, case .queue = source, !music, !loading, !suspended, !connecting, api.isConnected,
               AppDelegate.now - lastQueueLoad > 15 else { return }
         reload(quiet: true)
     }
@@ -361,7 +374,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     private var loadingText: String {
         switch source {
-        case .queue: return "Loading Spotify's queue\u{2026}"
+        case .queue: return music ? "Loading what Music is playing\u{2026}" : "Loading Spotify's queue\u{2026}"
         case .library: return "Loading your playlists\u{2026}"
         case .liked: return "Loading Liked Songs\u{2026}"
         case .playlist(_, let name, _): return "Loading \(name)\u{2026}"
@@ -380,7 +393,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
         generation += 1
         loading = false
         guard !connecting else { return }
-        guard api.isConnected else {
+        guard music || api.isConnected else {
             setInfo(PlaylistEntry.notConnected)
             return
         }
@@ -393,6 +406,10 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     private func load(_ src: PlaylistSource, _ gen: Int, quiet: Bool) async {
         defer { if gen == generation { loading = false } }
         do {
+            if music {
+                try await loadMusic(src, gen)
+                return
+            }
             switch src {
             case .queue:
                 lastQueueLoad = AppDelegate.now
@@ -429,6 +446,33 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
         } catch {
             guard gen == generation, !Task.isCancelled else { return }
             failed(error, src, quiet: quiet)
+        }
+    }
+
+    private func loadMusic(_ src: PlaylistSource, _ gen: Int) async throws {
+        switch src {
+        case .library:
+            let rows = try await MusicLibrary.playlists()
+            guard gen == generation else { return }
+            if rows.isEmpty { setInfo([.info("You have no playlists in Music.")]) } else { setEntries(rows, complete: true) }
+        case .queue, .playlist:
+            var id: String?
+            if case .playlist(let pid, _, _) = src { id = pid }
+            let list: (id: String, name: String, tracks: [PlaylistEntry])
+            do {
+                list = try await MusicLibrary.tracks(playlist: id, limit: Self.maxEntries)
+            } catch let e as MusicLibrary.ScriptError where e.code == -1728 && id == nil {
+                guard gen == generation else { return }
+                setInfo([.info("Music isn't playing from one of your playlists."), .info(""),
+                         .info("Double-click here to pick one.", .showLibrary)])
+                return
+            }
+            guard gen == generation else { return }
+            if id == nil { musicQueueID = list.id }
+            if list.tracks.isEmpty { setInfo([.info("Nothing here yet.")]) } else { setEntries(list.tracks, complete: true) }
+        case .liked:
+            setInfo([.info("Liked Songs is a Spotify list."), .info(""),
+                     .info("Double-click here to see your playlists.", .showLibrary)])
         }
     }
 
@@ -549,7 +593,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
             entries = saved.entries
             offset = saved.offset
             clampOffset()
-            app.show("PLAYLIST: \(source.label)", seconds: 2)
+            app.show("PLAYLIST: \(label(source))", seconds: 2)
             redraw()
             save()
             return
@@ -561,7 +605,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
             library = nil
         }
         source = target
-        app.show("PLAYLIST: \(target.label)", seconds: 2)
+        app.show("PLAYLIST: \(label(target))", seconds: 2)
         reload()
         save()
     }
@@ -699,6 +743,13 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     }
 
     private func play(_ e: PlaylistEntry, at index: Int, uri: String) {
+        if music {
+            var list = musicQueueID
+            if case .playlist(let id, _, _) = source { list = id }
+            guard let list, app.music.playMusic(playlist: list, track: uri) else { return }
+            app.show("PLAYING \(e.title.uppercased())", seconds: 2)
+            return
+        }
         let spotify = app.spotify
         let what: Playback.What
         switch source {
@@ -795,6 +846,12 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
 
     func menuChosen(_ m: PlaylistMenu, _ i: Int) {
         guard m.items.indices.contains(i) else { return }
+        let spotifyOnly: Set<PlaylistMenuItem> = [.addURL, .addFile, .removeMisc, .removeAll, .crop, .removeSelected,
+                                                  .sortList, .fileInfo, .saveList]
+        if music, spotifyOnly.contains(m.items[i]) {
+            app.show("NOT AVAILABLE FOR APPLE MUSIC", seconds: 2)
+            return
+        }
         switch m.items[i] {
         case .addURL: promptAddURL()
         case .addDir, .loadList: open(.library)
@@ -825,6 +882,10 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     }
 
     private func addToQueue(_ uris: [String]) {
+        guard !music else {
+            app.show("MUSIC DOESN'T LET APPS ADD TO UP NEXT", seconds: 2.5)
+            return
+        }
         guard api.isConnected else {
             connect()
             return
@@ -902,8 +963,12 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
     }
 
     func showInSpotify() {
+        if music {
+            app.showSpotify()  // brings Music forward
+            return
+        }
         let e = selectedEntries().first(where: { $0.uri != nil }) ?? currentIndex.map { entries[$0] }
-        guard let uri = e?.uri, let safe = SpotifyBridge.sanitized(uri), let url = URL(string: safe) else {
+        guard let uri = e?.uri, let safe = SpotifyLink.sanitized(uri), let url = URL(string: safe) else {
             app.show("SELECT SOMETHING FIRST", seconds: 2)
             return
         }
@@ -920,6 +985,17 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
             item.target = self
             item.tag = tag
             m.addItem(item)
+        }
+        if music {
+            add("Now Playing", #selector(menuSource(_:)), tag: 0)
+            add("Your Playlists", #selector(menuSource(_:)), tag: 1)
+            m.addItem(.separator())
+            add("Play", #selector(menuPlay))
+            add("Show Music", #selector(menuShowInSpotify))
+            m.addItem(.separator())
+            add("Refresh", #selector(menuRefresh))
+            add("Close Playlist Editor", #selector(menuClose))
+            return m
         }
         add("Queue", #selector(menuSource(_:)), tag: 0)
         add("Your Playlists", #selector(menuSource(_:)), tag: 1)
@@ -973,7 +1049,7 @@ final class PlaylistController: NSObject, NSWindowDelegate, NSMenuItemValidation
             item.state = item.tag == current ? .on : .off
         case #selector(menuPlay): return !selection.isEmpty
         case #selector(menuAddToQueue): return selectedEntries().contains { $0.kind == .track && $0.uri != nil }
-        case #selector(menuShowInSpotify): return selectedEntries().contains { $0.uri != nil }
+        case #selector(menuShowInSpotify): return music || selectedEntries().contains { $0.uri != nil }
         case #selector(menuCopyLinks): return entries.contains { $0.uri.flatMap(SpotifyLink.webURL(for:)) != nil }
         default: break
         }

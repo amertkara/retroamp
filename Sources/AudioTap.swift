@@ -1,7 +1,7 @@
 import CoreAudio
 import Foundation
 
-/// Captures Spotify's audio output with a Core Audio process tap (macOS 14.2+) and feeds the
+/// Captures the player app's audio output (Spotify's or Music's) with a Core Audio process tap (macOS 14.2+) and feeds the
 /// analyzer. macOS asks for "System Audio Recording" permission the first time capture starts.
 ///
 /// The tap sits in a private aggregate device that a real output device clocks, as in Apple's
@@ -11,12 +11,12 @@ import Foundation
 /// Bluetooth headset would drop into its call profile. If there is no such device, or the
 /// clocked device won't start, the tap-only layout is tried as well.
 ///
-/// Capture runs only while Spotify is sending audio, so the clock device can sleep otherwise.
+/// Capture runs only while the app is sending audio, so the clock device can sleep otherwise.
 ///
 /// Not main-actor isolated on purpose: the IO block runs on `ioQueue`. `maintain()`,
 /// `start()` and `stop()` must be called from the main thread.
 final class AudioTap: @unchecked Sendable {
-    enum Status: Equatable { case idle, waitingForSpotify, running, failed(OSStatus) }
+    enum Status: Equatable { case idle, waitingForApp, running, failed(OSStatus) }
 
     /// An audio device, as far as choosing a clock goes.
     struct Device: Equatable {
@@ -29,15 +29,15 @@ final class AudioTap: @unchecked Sendable {
         var hidden = false
     }
 
-    /// Seconds of quiet from Spotify before capture stops.
+    /// Seconds of quiet from the app before capture stops.
     static let idleStop: TimeInterval = 20
 
     let analyzer: Analyzer
     private(set) var status: Status = .idle
     /// Sample rate of the captured audio (kept after capture stops, for the kHz display).
     private(set) var sampleRate: Double = 0
-    /// Whether one of Spotify's audio processes is playing to an output (polled by `maintain`).
-    private(set) var spotifyOutputActive = false
+    /// Whether one of the app's audio processes is playing to an output (polled by `maintain`).
+    private(set) var outputActive = false
     /// Starts that failed in a row.
     private(set) var failedStarts = 0
     /// The device clocking the running capture, or nil when the aggregate holds only the tap.
@@ -53,31 +53,37 @@ final class AudioTap: @unchecked Sendable {
     private var lastStart: TimeInterval = 0
     private var lastOutput: TimeInterval = 0
     private var silentRestarts = 0
-    private var isSpotify: [AudioObjectID: Bool] = [:]  // process object → bundle ID matches
+    private var bundleID = Backend.spotify.bundleID      // the app whose processes are tapped
+    private var isApp: [AudioObjectID: Bool] = [:]       // process object → bundle ID matches
     private let ioQueue = DispatchQueue(label: "local.retroamp.audiotap", qos: .userInteractive)
 
     init(analyzer: Analyzer) { self.analyzer = analyzer }
 
-    /// Call about once a second. Starts capture when Spotify starts sending audio and stops it
-    /// once Spotify has been quiet for `idleStop` seconds. Rebuilds it when Spotify's audio
+    /// Call about once a second. Starts capture when the app (`bundleID`) starts sending audio and
+    /// stops it once it has been quiet for `idleStop` seconds. Rebuilds it when the app's audio
     /// processes or the default output device change, or when the stream stalls during playback.
-    func maintain(spotifyRunning: Bool) {
+    func maintain(running: Bool, bundleID: String) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard spotifyRunning else {
+        if bundleID != self.bundleID {
             stop()
-            spotifyOutputActive = false
-            status = .waitingForSpotify
+            self.bundleID = bundleID
+            isApp = [:]
+        }
+        guard running else {
+            stop()
+            outputActive = false
+            status = .waitingForApp
             return
         }
-        let processes = spotifyProcesses()
-        spotifyOutputActive = processes.contains { Self.uint32($0, kAudioProcessPropertyIsRunningOutput) == 1 }
-        if spotifyOutputActive { lastOutput = now }
+        let processes = appProcesses()
+        outputActive = processes.contains { Self.uint32($0, kAudioProcessPropertyIsRunningOutput) == 1 }
+        if outputActive { lastOutput = now }
 
         if status == .running {
             if now - lastOutput > Self.idleStop { stop(); return }
             if !processes.isEmpty, Set(processes) != Set(tappedProcesses) { start(processes); return }
             if Self.defaultOutputDevice() != defaultOutputAtStart { start(processes); return }
-            guard spotifyOutputActive else { return }
+            guard outputActive else { return }
             if analyzer.secondsSinceSignal < 1 { silentRestarts = 0; return }
             // No callbacks at all, or only silence (e.g. the permission prompt was answered after
             // capture started). Rebuild, but not over and over if permission was denied. A layout
@@ -90,7 +96,7 @@ final class AudioTap: @unchecked Sendable {
             }
             return
         }
-        guard spotifyOutputActive, now >= nextAttempt else { return }
+        guard outputActive, now >= nextAttempt else { return }
         nextAttempt = now + 2
         start(processes)
     }
@@ -98,8 +104,8 @@ final class AudioTap: @unchecked Sendable {
     func start(_ processes: [AudioObjectID]? = nil) {
         stop()
         lastStart = ProcessInfo.processInfo.systemUptime
-        let processes = processes ?? spotifyProcesses()
-        guard !processes.isEmpty else { status = .waitingForSpotify; return }
+        let processes = processes ?? appProcesses()
+        guard !processes.isEmpty else { status = .waitingForApp; return }
 
         // Clocked by an output device first, then tap-only. The order flips once tap-only has
         // worked where the clocked layout failed.
@@ -240,21 +246,21 @@ final class AudioTap: @unchecked Sendable {
             ?? AudioObjectID(kAudioObjectUnknown)
     }
 
-    // MARK: Spotify's processes
+    // MARK: The app's processes
 
-    /// Audio process objects whose bundle ID starts with com.spotify.client (app and helpers).
+    /// Audio process objects whose bundle ID starts with the app's (the app and its helpers).
     /// Bundle IDs are cached per object, since this runs every second.
-    private func spotifyProcesses() -> [AudioObjectID] {
+    private func appProcesses() -> [AudioObjectID] {
         let all = Self.objectIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList)
         var known: [AudioObjectID: Bool] = [:]
         for id in all {
-            if let cached = isSpotify[id] {
+            if let cached = isApp[id] {
                 known[id] = cached
             } else if let bundle = Self.string(id, kAudioProcessPropertyBundleID) {
-                known[id] = bundle.hasPrefix(SpotifyBridgeID.bundleID)
+                known[id] = bundle.hasPrefix(bundleID)
             }
         }
-        isSpotify = known
+        isApp = known
         return all.filter { known[$0] == true }
     }
 
@@ -326,6 +332,3 @@ final class AudioTap: @unchecked Sendable {
         return fmt
     }
 }
-
-/// Bundle ID shared with non-main-actor code.
-enum SpotifyBridgeID { static let bundleID = "com.spotify.client" }
