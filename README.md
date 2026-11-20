@@ -81,6 +81,12 @@ log show --last 10m --style compact --predicate 'process == "Retroamp"'
 - The playlist editor shows **Now Playing** (the playlist Music plays from, current track highlighted) and **Your Playlists** with their total length. Double-click a track to play it inside its playlist, or a playlist to open it. Lists are capped at 5,000 tracks.
 - Music doesn't let other apps read or change Up Next, so adding to the queue, links and DJ are Spotify only.
 
+<p align="center">
+  <img src="docs/apple-music.png" width="412" alt="Retroamp driving the Music app: the visualizer and time running, your playlists listed in the playlist editor">
+  <br>
+  <sub>Retroamp on Apple Music, track and playlist names pixelated.</sub>
+</p>
+
 ## The main window
 
 | Control | What it does |
