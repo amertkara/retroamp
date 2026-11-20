@@ -46,11 +46,12 @@ final class SpotifyBridge: NSObject {
 
     // MARK: Polling
 
-    private static let pollSource = """
+    static let pollSource = """
     if application "Spotify" is running then
         with timeout of 3 seconds
             tell application "Spotify"
-                set st to player state
+                -- not "st": macOS 26 reserves it ("1st"), so the script wouldn't compile
+                set pstate to player state
                 set pos to player position
                 set vol to sound volume
                 set sh to shuffling
@@ -68,7 +69,7 @@ final class SpotifyBridge: NSObject {
                     set talbum to album of t
                     set tdur to duration of t
                 end try
-                return {st, pos, vol, sh, rp, tid, tname, tartist, talbum, tdur}
+                return {pstate, pos, vol, sh, rp, tid, tname, tartist, talbum, tdur}
             end tell
         end timeout
     end if
