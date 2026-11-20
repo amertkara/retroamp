@@ -13,7 +13,7 @@ Retroamp puts the classic 275×116 main window and the playlist editor on top of
 ## Features
 
 - **The classic look.** Both windows are drawn from a skin's sprite sheets with sharp pixels, at the original size or resized up to 3×.
-- **Classic skins.** The default is the Winamp 2.91 base skin, which Retroamp downloads on first launch. It loads any Winamp 2.x `.wsz` skin, and has an original built-in skin of its own.
+- **Classic skins.** The default is the Winamp 2.91 base skin, which Retroamp downloads on first launch. It loads any Winamp 2.x `.wsz` skin, has an original built-in skin of its own, and has a browser for the Winamp Skin Museum's 100,000-odd skins that puts each one on as you click it.
 - **A real visualizer.** Spotify's actual audio drives the spectrum analyzer and oscilloscope, through a Core Audio process tap.
 - **Your Spotify library.** The playlist editor shows Spotify's queue, your playlists and Liked Songs, through the Spotify Web API.
 - **Spotify stays in the background.** Retroamp starts tracks, playlists and DJ in ways that don't bring Spotify's window to the front.
@@ -196,15 +196,32 @@ Connecting uses the authorization code flow with PKCE, so there's no client secr
 
 The Skins submenu in the options menu has these choices:
 
+- **Skin Museum… (⌥S).** Browse the 100,000-odd skins of the Winamp Skin Museum at [skins.webamp.org](https://skins.webamp.org) in a window, in the museum's own order or by search.
+  - Click a skin, or move to it with the arrow keys, and it goes on the player at once.
+  - **Next Skin (⌘])** and **Previous Skin (⌘[)** step through the same list, with the window open or closed.
+  - Screenshots and skins are downloaded only when shown or chosen, and kept: skins in `~/Library/Application Support/Retroamp/Skins/Museum/` (checked against the museum's MD5), screenshots in `~/Library/Caches/local.retroamp/`.
+  - A skin that won't load shows `CAN'T LOAD THIS ONE`, and the current skin stays.
 - **Winamp Classic (Base 2.91).** This is the default.
   - Retroamp doesn't bundle this skin. On first launch it downloads `base-2.91.wsz` from the [Webamp](https://github.com/captbaritone/webamp) repository, pinned to a commit, and checks its SHA-256.
   - The copy is kept in `~/Library/Application Support/Retroamp/Skins/`.
   - If the download fails, Retroamp uses its built-in skin and tries again on the next launch.
 - **Retroamp Built-in.** An original skin, painted in code.
 - **Load Skin… (⌘O).** Any classic Winamp 2.x skin, either as a `.wsz` or `.zip` file or as an unzipped folder. You can also drop a skin onto the window, or open the skin file with Retroamp.
-- **Get More Skins….** Opens the Winamp Skin Museum at [skins.webamp.org](https://skins.webamp.org), which has thousands of them.
 
 Modern `.wal` skins aren't supported. Retroamp remembers the skin you chose. The playlist editor uses the skin's `PLEDIT.BMP` and the colours and font from its `PLEDIT.TXT`.
+
+<p align="center">
+  <img src="docs/skin-museum.png" width="640" alt="The Skin Museum window: a grid of museum skins with a search field">
+  <br>
+  <sub>The Skin Museum window. The skins belong to their authors.</sub>
+</p>
+
+Classic skins have quirks that Winamp tolerated, and Retroamp follows it:
+
+- `REGION.TXT` gives the main window its shape. Outside it the window is transparent and clicks go through.
+- Sprite sheets a skin leaves out come from the Winamp base skin once it's downloaded, as in Winamp and Webamp (the built-in skin before that). Of a sheet smaller than the format, Retroamp uses what's there.
+- When an archive has the same sheet twice at the same depth (`cbuttons.bmp` and `cButtons.bmp`), the later one wins, as it did when Winamp unzipped onto a case-insensitive disk.
+- The fourth byte of a 32-bit BMP is padding, not alpha, and BMP headers that list colours a true-colour image doesn't have are ignored.
 
 <p align="center">
   <img src="docs/builtin-skin.png" width="550" alt="Retroamp's main window in its built-in skin">
@@ -265,7 +282,8 @@ The code is in `Sources/`:
 | `SpotifyWebAPI.swift` | Web API client, PKCE sign-in, Keychain, loopback redirect listener |
 | `Spotify.swift` | AppleScript bridge and Spotify link parsing |
 | `Playback.swift` | Starting tracks, playlists and DJ without raising Spotify: the Web API, `spotify_cli`, AppleScript and the focus guard |
-| `Skin.swift`, `Zip.swift`, `ClassicSkin.swift` | `.wsz` loading (in memory), the classic skin download |
+| `Skin.swift`, `Zip.swift`, `ClassicSkin.swift` | `.wsz` loading (in memory), `REGION.TXT`, the classic skin download |
+| `SkinMuseum.swift`, `SkinBrowser.swift` | The Winamp Skin Museum's API and downloads, and the Skin Museum window |
 | `DefaultSkin*.swift`, `PixelCanvas.swift`, `PixelFont.swift` | The built-in skin |
 | `AudioTap.swift`, `Analyzer.swift` | Audio capture and FFT |
 | `Snapshot.swift`, `SelfTest.swift` | Headless helpers |
