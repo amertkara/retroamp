@@ -21,7 +21,7 @@ enum ClassicSkin {
     /// The downloaded copy, if present and unmodified.
     static func loadCached() -> Skin? {
         guard let data = try? Data(contentsOf: fileURL), isIntact(data) else { return nil }
-        return try? Skin.load(from: fileURL, name: displayName)
+        return try? Skin.load(from: fileURL, name: displayName, isBase: true)
     }
 
     static func download() async throws -> Skin {
@@ -40,6 +40,6 @@ enum ClassicSkin {
         guard isIntact(data) else { throw SkinError.unreadable("the download doesn't match the expected file") }
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: fileURL, options: .atomic)
-        return try Skin.load(from: fileURL, name: displayName)
+        return try Skin.load(from: fileURL, name: displayName, isBase: true)
     }
 }

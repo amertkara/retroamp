@@ -20,6 +20,7 @@ enum SelfTest {
         parsing()
         playback()
         windowSize()
+        skins()
         visualizer()
         print(failures == 0 ? "All checks passed." : "\(failures) check(s) failed.")
         return failures == 0 ? 0 : 1
@@ -284,6 +285,70 @@ enum SelfTest {
     }
 
     // MARK: Window size
+
+    // MARK: Skins
+
+    /// A grey 24- or 32-bit BMP (32-bit with 0 in the fourth byte except for the last pixel, as in
+    /// skins that ImageIO then reads as mostly transparent); `important` goes into biClrImportant.
+    private static func bmp(_ w: Int, _ h: Int, bpp: Int = 24, important: UInt32 = 0) -> Data {
+        let row = (w * bpp / 8 + 3) & ~3
+        var d = Data("BM".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        u32(UInt32(54 + row * h)); u32(0); u32(54)
+        u32(40); u32(UInt32(w)); u32(UInt32(h)); u16(1); u16(UInt16(bpp)); u32(0); u32(UInt32(row * h))
+        u32(2835); u32(2835); u32(0); u32(important)
+        d.append(bpp == 32 ? Data((0..<(row * h)).map { $0 % 4 != 3 ? 0x80 : $0 == row * h - 1 ? 0xFF : 0 })
+                           : Data(repeating: 0x80, count: row * h))
+        return d
+    }
+
+    private static func skins() {
+        let region = Skin.parseRegion("""
+        [Normal]
+        NumPoints=4, 2
+        PointList=0,0, 275,0, 275,116 0,116, 1,1 2,2
+        [WindowShade]
+        NumPoints=4
+        PointList=0,0,275,0,275,14,0,14
+        """)
+        check("region sections and polygons", region["normal"]?.count == 1 && region["normal"]?[0].count == 4
+              && region["windowshade"]?.count == 1, "\(region)")
+        // Game_Boy_Advance_Amp.wsz: 6 points promised, 5½ given. Drawn, it would hide the whole window.
+        let short = Skin.parseRegion("[Normal]\nNumPoints = 6\nPointList = 4,0, 270,0, 272,1, 273,2, 275,5, 0,")
+        check("region polygon short of points dropped", short["normal"] == nil, "\(short)")
+
+        // A notch in the top-left corner: transparent there, opaque in the middle.
+        let notch = Skin.parseRegion("[Normal]\nNumPoints=6\nPointList=4,0 275,0 275,116 0,116 0,4 4,4")["normal"] ?? []
+        let mask = Skin.regionMask(notch, width: 275, height: 116)
+        let px = mask.flatMap { $0.dataProvider?.data as Data? }
+        func alpha(_ x: Int, _ y: Int) -> UInt8? { px.map { $0[y * mask!.bytesPerRow + x * 4 + 3] } }
+        check("region mask", alpha(1, 1) == 0 && alpha(100, 50) == 255, "\(String(describing: alpha(1, 1))), \(String(describing: alpha(100, 50)))")
+
+        // ImageIO refuses a true-colour BMP that lists "important colours"; Winamp didn't.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("retroamp-selftest-\(getpid())")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try? bmp(275, 116).write(to: dir.appendingPathComponent("MAIN.BMP"))
+        try? bmp(155, 18, important: 37).write(to: dir.appendingPathComponent("Text.bmp"))
+        try? bmp(136, 36, bpp: 32).write(to: dir.appendingPathComponent("cbuttons.bmp"))
+        let skin = try? Skin.load(from: dir)
+        check("BMP with biClrImportant loads", skin?.sheet(.text) != nil)
+
+        // A sheet smaller than the format: the part of a sprite off the sheet is transparent, the
+        // part on it is the skin's (gokugump.zip's CBUTTONS.BMP is 112×34, not 136×36).
+        try? bmp(112, 34).write(to: dir.appendingPathComponent("shufrep.bmp"))
+        let small = try? Skin.load(from: dir)
+        let partial = small?.image(Sprite(.shufrep, 100, 0, 28, 15))
+        let bytes = partial?.dataProvider?.data.map { [UInt8](($0 as Data)) }
+        let row = partial?.bytesPerRow ?? 0
+        check("sprite partly off its sheet", partial?.width == 28 && bytes?[3] == 255 && bytes?[row - 1] == 0,
+              "\(String(describing: partial?.width))")
+
+        // The fourth byte of a 32-bit BMP is padding: grey stays grey, not black.
+        let red = skin?.sheet(.cbuttons)?.dataProvider?.data.map { CFDataGetBytePtr($0)[0] }
+        check("32-bit BMP padding isn't alpha", red == 0x80, "\(String(describing: red))")
+    }
 
     private static func windowSize() {
         typealias A = AppDelegate

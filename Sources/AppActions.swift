@@ -199,11 +199,7 @@ extension AppDelegate {
 
     func loadSkin(from url: URL) {
         do {
-            applySkin(try Skin.load(from: url))
-            skinChoice = .file
-            UserDefaults.standard.set(url.path, forKey: Keys.skinPath)
-            savePreferences()
-            show("SKIN: \(skin.name)", seconds: 2.5)
+            use(try Skin.load(from: url), file: url, name: nil)
         } catch {
             let alert = NSAlert()
             alert.messageText = "Couldn't load \(url.lastPathComponent)"
@@ -211,6 +207,31 @@ extension AppDelegate {
             alert.runModal()
         }
     }
+
+    /// Puts a skin file on the player (the Skin Museum's downloads); false, with a short note on the
+    /// display, when it won't load, and the current skin stays.
+    func applySkinFile(_ url: URL, name: String) -> Bool {
+        guard let s = try? Skin.load(from: url, name: name) else {
+            show("CAN'T LOAD THIS ONE", seconds: 3)
+            return false
+        }
+        use(s, file: url, name: name)
+        return true
+    }
+
+    /// Applies a skin loaded from a file and remembers it for the next launch.
+    private func use(_ s: Skin, file: URL, name: String?) {
+        applySkin(s)
+        skinChoice = .file
+        UserDefaults.standard.set(file.path, forKey: Keys.skinPath)
+        UserDefaults.standard.set(name, forKey: Keys.skinName)
+        savePreferences()
+        show("SKIN: \(s.name.uppercased())", seconds: 2.5)
+    }
+
+    @objc func showSkinMuseum() { skinBrowser.show() }
+    @objc func nextSkin() { skinBrowser.step(1) }
+    @objc func previousSkin() { skinBrowser.step(-1) }
 
     @objc func loadSkinFromPanel() {
         let panel = NSOpenPanel()
@@ -242,7 +263,6 @@ extension AppDelegate {
         }
     }
 
-    @objc func openSkinMuseum() { NSWorkspace.shared.open(URL(string: "https://skins.webamp.org/")!) }
 
     // MARK: Menus
 
@@ -262,12 +282,15 @@ extension AppDelegate {
         m.addItem(.separator())
 
         let skins = NSMenu(title: "Skins")
-        for (title, action, key) in [("Winamp Classic (Base 2.91)", #selector(useClassicSkin), ""),
+        for (title, action, key) in [("Skin Museum…", #selector(showSkinMuseum), "s"),
+                                     ("Next Skin", #selector(nextSkin), "]"),
+                                     ("Previous Skin", #selector(previousSkin), "["),
+                                     ("Winamp Classic (Base 2.91)", #selector(useClassicSkin), ""),
                                      ("Retroamp Built-in", #selector(useBuiltInSkin), ""),
-                                     ("Load Skin…", #selector(loadSkinFromPanel), "o"),
-                                     ("Get More Skins…", #selector(openSkinMuseum), "")] {
-            if action == #selector(loadSkinFromPanel) { skins.addItem(.separator()) }
+                                     ("Load Skin…", #selector(loadSkinFromPanel), "o")] {
+            if action == #selector(useClassicSkin) || action == #selector(loadSkinFromPanel) { skins.addItem(.separator()) }
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            if action == #selector(showSkinMuseum) { item.keyEquivalentModifierMask = [.option] }  // Alt+S, as in the original
             item.target = self
             skins.addItem(item)
         }

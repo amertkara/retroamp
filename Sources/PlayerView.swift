@@ -49,7 +49,7 @@ final class PlayerView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    override var isOpaque: Bool { true }
+    override var isOpaque: Bool { controller?.skin.regionMask == nil }
     override var acceptsFirstResponder: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

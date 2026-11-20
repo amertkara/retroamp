@@ -59,6 +59,13 @@ final class MainRenderer {
         drawInfo(skin, s)
         drawSliders(skin, s)
         drawButtons(skin, s)
+        if let mask = skin.regionMask {
+            // REGION.TXT: keep only what lies inside the skin's window shape.
+            ctx.saveGState()
+            ctx.setBlendMode(.destinationIn)
+            ctx.draw(mask, in: CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.restoreGState()
+        }
         return ctx.makeImage()
     }
 

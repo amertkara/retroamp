@@ -78,6 +78,8 @@ final class Skin {
     let visColors: [Color]
     let hasNumsEx: Bool
     let playlistStyle: PlaylistStyle
+    /// REGION.TXT's main-window shape: opaque inside, transparent outside (nil: a plain rectangle).
+    let regionMask: CGImage?
     private let sheets: [SheetName: CGImage]
     private let fallback: [SheetName: CGImage]
     private var cache: [Sprite: CGImage] = [:]
@@ -85,16 +87,27 @@ final class Skin {
     static let builtIn: Skin = {
         let sheets = DefaultSkin.makeSheets()
         return Skin(name: "Retroamp", sheets: sheets, fallback: sheets, visColors: DefaultSkin.visColors,
-                    playlistStyle: DefaultSkin.playlistStyle)
+                    playlistStyle: DefaultSkin.playlistStyle, regionMask: nil)
     }()
 
+    /// What a skin's missing sheets are drawn from: the Winamp base skin once it's downloaded, as in
+    /// Winamp and Webamp, otherwise the built-in skin.
+    private static var baseSheets: [SheetName: CGImage]?
+    private static var fallbackSheets: [SheetName: CGImage] {
+        if baseSheets == nil, FileManager.default.fileExists(atPath: ClassicSkin.fileURL.path) {
+            baseSheets = ClassicSkin.loadCached()?.sheets
+        }
+        return baseSheets ?? builtIn.sheets
+    }
+
     private init(name: String, sheets: [SheetName: CGImage], fallback: [SheetName: CGImage], visColors: [Color],
-                 playlistStyle: PlaylistStyle) {
+                 playlistStyle: PlaylistStyle, regionMask: CGImage?) {
         self.name = name
         self.sheets = sheets
         self.fallback = fallback
         self.visColors = visColors
         self.playlistStyle = playlistStyle
+        self.regionMask = regionMask
         hasNumsEx = sheets[.numsEx] != nil
     }
 
@@ -114,27 +127,39 @@ final class Skin {
         return img
     }
 
+    /// The sprite's pixels. When a sheet is smaller than the format says, the part of a sprite that
+    /// lies off it is transparent, as in Winamp and Webamp; only a sprite wholly off it falls back.
     private static func crop(_ sheet: CGImage, _ s: Sprite) -> CGImage? {
-        guard s.x >= 0, s.y >= 0, s.x + s.w <= sheet.width, s.y + s.h <= sheet.height else { return nil }
-        return sheet.cropping(to: CGRect(x: s.x, y: s.y, width: s.w, height: s.h))
+        let r = CGRect(x: s.x, y: s.y, width: s.w, height: s.h)
+        let visible = r.intersection(CGRect(x: 0, y: 0, width: sheet.width, height: sheet.height))
+        guard !visible.isEmpty, let part = sheet.cropping(to: visible) else { return nil }
+        if visible == r { return part }
+        guard let ctx = CGContext(data: nil, width: s.w, height: s.h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        // Top-left origin in the sprite, bottom-left in the context.
+        ctx.draw(part, in: CGRect(x: visible.minX - r.minX, y: r.maxY - visible.maxY, width: visible.width, height: visible.height))
+        return ctx.makeImage()
     }
 
     // MARK: Loading
 
     /// Loads a classic skin from a .wsz/.zip archive (read in memory) or an unpacked folder.
-    static func load(from url: URL, name displayName: String? = nil) throws -> Skin {
+    /// `isBase` loads the Winamp base skin itself, whose few gaps the built-in skin fills.
+    static func load(from url: URL, name displayName: String? = nil, isBase: Bool = false) throws -> Skin {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { throw SkinError.unreadable("file not found") }
 
         // Index files by lower-cased name. Skins are often zipped with a top-level folder, so the
-        // shallowest match wins.
+        // shallowest match wins. Between equals ("cbuttons.bmp" and "cButtons.bmp") the later one
+        // does, as Winamp unzipping onto a case-insensitive disk ended up with it, and as Webamp does.
         var files: [String: (depth: Int, read: () -> Data?)] = [:]
         func add(_ path: String, _ read: @escaping () -> Data?) {
             let parts = path.split(separator: "/")
             guard let last = parts.last, !last.hasPrefix("."), !parts.contains("__MACOSX") else { return }
             let key = last.lowercased()
-            if let old = files[key], old.depth <= parts.count { return }
+            if let old = files[key], old.depth < parts.count { return }
             files[key] = (parts.count, read)
         }
 
@@ -168,20 +193,88 @@ final class Skin {
             let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
             for (i, c) in parseVisColors(text).prefix(24).enumerated() { vis[i] = c }
         }
-        // Without its own PLEDIT.BMP a skin borrows the built-in playlist art, so keep its colours too.
-        var style = sheets[.pledit] != nil ? PlaylistStyle.classic : DefaultSkin.playlistStyle
+        let fallback = isBase ? Skin.builtIn.sheets : Skin.fallbackSheets
+        // Without its own PLEDIT.BMP a skin borrows the fallback's playlist art, so its colours too.
+        let borrowsBuiltIn = sheets[.pledit] == nil && fallback[.pledit] === Skin.builtIn.sheets[.pledit]
+        var style = borrowsBuiltIn ? DefaultSkin.playlistStyle : PlaylistStyle.classic
         if let data = files["pledit.txt"]?.read() {
             let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
             style = PlaylistStyle.parse(text, base: style)
         }
+        var mask: CGImage?
+        if let data = files["region.txt"]?.read() {
+            let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+            mask = regionMask(parseRegion(text)["normal"] ?? [], width: Layout.size.w, height: Layout.size.h)
+        }
         let name = displayName ?? url.deletingPathExtension().lastPathComponent
-        return Skin(name: name, sheets: sheets, fallback: Skin.builtIn.sheets, visColors: vis, playlistStyle: style)
+        return Skin(name: name, sheets: sheets, fallback: fallback, visColors: vis, playlistStyle: style, regionMask: mask)
+    }
+
+    // MARK: REGION.TXT
+
+    /// Polygons per section (lower-cased: "normal", "windowshade", "equalizer"…), in skin pixels
+    /// with a top-left origin. As Webamp's regionParser: NumPoints lists each polygon's size,
+    /// PointList the x,y pairs separated by commas or spaces; polygons under 3 points are skipped.
+    /// Unlike Webamp, a polygon that runs out of points is dropped too: in Webamp it hides the
+    /// whole window (Game_Boy_Advance_Amp.wsz lists 6 points and gives 5½).
+    static func parseRegion(_ text: String) -> [String: [[CGPoint]]] {
+        var sections: [String: [String: String]] = [:]
+        var current: String?
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("["), let end = line.firstIndex(of: "]") {
+                current = line[line.index(after: line.startIndex)..<end].trimmingCharacters(in: .whitespaces).lowercased()
+                continue
+            }
+            guard let section = current, !line.hasPrefix(";"), let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            var value = line[line.index(after: eq)...]
+            if let second = value.firstIndex(of: "=") { value = value[..<second] }  // as Webamp: ignore a second "="
+            sections[section, default: [:]][key] = value.trimmingCharacters(in: .whitespaces)
+        }
+        var out: [String: [[CGPoint]]] = [:]
+        for (name, keys) in sections {
+            guard let counts = keys["numpoints"], let list = keys["pointlist"] else { continue }
+            let numbers = list.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" }).compactMap { Double($0) }
+            var points: [CGPoint] = []
+            var i = 0
+            while i + 1 < numbers.count { points.append(CGPoint(x: numbers[i], y: numbers[i + 1])); i += 2 }
+            var at = 0
+            var polygons: [[CGPoint]] = []
+            for n in counts.split(separator: ",").compactMap({ Int($0.trimmingCharacters(in: .whitespaces)) }) {
+                defer { at += max(0, n) }
+                guard n >= 3, at + n <= points.count else { continue }
+                polygons.append(Array(points[at..<(at + n)]))
+            }
+            if !polygons.isEmpty { out[name] = polygons }
+        }
+        return out
+    }
+
+    /// The union of the polygons as an RGBA image, opaque inside and clear outside.
+    static func regionMask(_ polygons: [[CGPoint]], width: Int, height: Int) -> CGImage? {
+        guard !polygons.isEmpty,
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.setShouldAntialias(false)
+        ctx.translateBy(x: 0, y: CGFloat(height))
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        for p in polygons {
+            ctx.beginPath()
+            ctx.addLines(between: p)
+            ctx.closePath()
+            ctx.fillPath()
+        }
+        return ctx.makeImage()
     }
 
     /// Decodes an image fully into memory as an opaque RGBA bitmap (classic skins have no alpha).
     private static func loadImage(_ data: Data) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+              var img = CGImageSourceCreateImageAtIndex(src, 0, nil) ?? retryBMP(data) else { return nil }
+        if data.starts(with: [0x42, 0x4D]) { img = ignoringAlpha(img) }
         let w = img.width, h = img.height
         guard w > 0, h > 0, w < 4096, h < 4096,
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -190,6 +283,38 @@ final class Skin {
         ctx.interpolationQuality = .none
         ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage()
+    }
+
+    /// Winamp ignores the fourth byte of a 32-bit BMP. ImageIO's image reports it as padding but
+    /// draws it as alpha, so a skin whose padding bytes are 0 came out black. Rebuilds the image
+    /// from its decoded bytes with that byte as padding.
+    private static func ignoringAlpha(_ img: CGImage) -> CGImage {
+        guard img.bitsPerPixel == 32, img.bitsPerComponent == 8, let space = img.colorSpace,
+              let bytes = img.dataProvider?.data, let provider = CGDataProvider(data: bytes) else { return img }
+        let skip: CGImageAlphaInfo
+        switch img.alphaInfo {
+        case .last, .noneSkipLast: skip = .noneSkipLast
+        case .first, .noneSkipFirst: skip = .noneSkipFirst
+        default: return img  // premultiplied: the colours are already gone
+        }
+        let info = (img.bitmapInfo.rawValue & ~CGBitmapInfo.alphaInfoMask.rawValue) | skip.rawValue
+        return CGImage(width: img.width, height: img.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: img.bytesPerRow, space: space, bitmapInfo: CGBitmapInfo(rawValue: info),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) ?? img
+    }
+
+    /// ImageIO refuses BMPs whose header lists "important colours" (or a palette size) that a
+    /// true-colour image doesn't have; Windows and browsers ignore those fields. Clears them.
+    private static func retryBMP(_ data: Data) -> CGImage? {
+        guard data.count > 54, data[0] == 0x42, data[1] == 0x4D else { return nil }
+        var b = [UInt8](data)
+        let headerSize = Int(b[14]) | Int(b[15]) << 8
+        let bpp = Int(b[28]) | Int(b[29]) << 8
+        guard headerSize >= 40 else { return nil }
+        for i in 50..<54 { b[i] = 0 }                  // biClrImportant
+        if bpp > 8 { for i in 46..<50 { b[i] = 0 } }   // biClrUsed
+        guard let src = CGImageSourceCreateWithData(Data(b) as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
     /// VISCOLOR.TXT: one "r,g,b" triple per line, optional "//" comments.

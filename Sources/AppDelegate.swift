@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var window: PlayerWindow!
     var view: PlayerView!
     var playlist: PlaylistController!
+    private(set) lazy var skinBrowser = SkinBrowser(app: self)
 
     // Preferences
     var alwaysOnTop = false
@@ -46,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var skinDownload: Task<Void, Never>?
 
     enum Keys {
-        static let skinPath = "skinPath", alwaysOnTop = "alwaysOnTop", scale = "windowScale"
+        static let skinPath = "skinPath", skinName = "skinName", alwaysOnTop = "alwaysOnTop", scale = "windowScale"
         static let legacyDoubleSize = "doubleSize"  // v0.1–0.2 opened at 2× by default
         static let visMode = "visMode", timeRemaining = "timeRemaining", windowTopLeft = "windowTopLeft"
         static let skinChoice = "skinChoice"
@@ -104,7 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.title = "Retroamp"
         window.isReleasedWhenClosed = false
         window.hasShadow = false  // the classic windows have none
-        window.backgroundColor = .black
         window.collectionBehavior = [.fullScreenNone]
         window.delegate = self
 
@@ -113,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         view.controller = self
         view.autoresizingMask = [.width, .height]
         window.contentView = view
+        applyWindowShape()
 
         if let saved = UserDefaults.standard.string(forKey: Keys.windowTopLeft) {
             window.setFrameTopLeftPoint(NSPointFromString(saved))
@@ -312,8 +313,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applySkin(_ s: Skin) {
         skin = s
-        view.needsDisplay = true
+        applyWindowShape()
         playlist?.redraw()
+    }
+
+    /// A skin with a REGION.TXT shapes the main window: it's transparent outside the shape, and
+    /// clicks there go to whatever is behind it.
+    private func applyWindowShape() {
+        let shaped = skin.regionMask != nil
+        window.isOpaque = !shaped
+        window.backgroundColor = shaped ? .clear : .black
+        view.needsDisplay = true
     }
 
     /// Fetches the classic base skin (first launch, or after choosing it from the Skins menu) and
@@ -352,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         skinChoice = d.string(forKey: Keys.skinChoice).flatMap(SkinChoice.init(rawValue:)) ?? (path == nil ? .classic : .file)
         switch skinChoice {
         case .file:
-            if let path, let s = try? Skin.load(from: URL(fileURLWithPath: path)) { skin = s }
+            if let path, let s = try? Skin.load(from: URL(fileURLWithPath: path), name: d.string(forKey: Keys.skinName)) { skin = s }
         case .classic:
             if let s = ClassicSkin.loadCached() { skin = s }
         case .builtin:
