@@ -195,6 +195,13 @@ enum SelfTest {
         check("running time", PlaylistEntry.longTimeString(3725) == "1:02:05" && PlaylistEntry.longTimeString(65) == "1:05")
         check("link sanitizing", SpotifyBridge.sanitized("spotify:track:abc\" & quit") == "spotify:track:abcquit"
               && SpotifyBridge.sanitized("file:///etc") == nil)
+
+        // Compiling reads Spotify's dictionary without launching it (macOS 26 broke a variable named "st").
+        if SpotifyBridge().isInstalled {
+            var err: NSDictionary?
+            let ok = NSAppleScript(source: SpotifyBridge.pollSource)?.compileAndReturnError(&err) == true
+            check("poll script compiles", ok, "\(err ?? [:])")
+        }
     }
 
     // MARK: Playback
