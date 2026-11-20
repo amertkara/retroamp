@@ -193,14 +193,16 @@ enum SelfTest {
         check("page total and next", page.total == 120 && page.next?.hasPrefix("https://api.spotify.com/v1/") == true)
 
         check("running time", PlaylistEntry.longTimeString(3725) == "1:02:05" && PlaylistEntry.longTimeString(65) == "1:05")
-        check("link sanitizing", SpotifyBridge.sanitized("spotify:track:abc\" & quit") == "spotify:track:abcquit"
-              && SpotifyBridge.sanitized("file:///etc") == nil)
+        check("link sanitizing", SpotifyLink.sanitized("spotify:track:abc\" & quit") == "spotify:track:abcquit"
+              && SpotifyLink.sanitized("file:///etc") == nil)
+        check("Music ID sanitizing", MusicLibrary.sanitized("542DFBEDEF4B253D") == "542DFBEDEF4B253D"
+              && MusicLibrary.sanitized("542DFBEDEF4B253D\" & quit") == nil && MusicLibrary.sanitized("abc") == nil)
 
-        // Compiling reads Spotify's dictionary without launching it (macOS 26 broke a variable named "st").
-        if SpotifyBridge().isInstalled {
+        // Compiling reads the app's dictionary without launching it (macOS 26 broke a variable named "st").
+        for backend in [Backend.spotify, .music] where PlayerBridge(backend).isInstalled {
             var err: NSDictionary?
-            let ok = NSAppleScript(source: SpotifyBridge.pollSource)?.compileAndReturnError(&err) == true
-            check("poll script compiles", ok, "\(err ?? [:])")
+            let ok = NSAppleScript(source: PlayerBridge(backend).pollSource)?.compileAndReturnError(&err) == true
+            check("\(backend.appName) poll script compiles", ok, "\(err ?? [:])")
         }
     }
 
@@ -259,8 +261,8 @@ enum SelfTest {
         {"active_device_id":"x","devices":[{"device_id":"other","is_self":false},{"device_id":"mine","is_self":true}]}
         """) == "mine")
 
-        let old = SpotifyStatus(running: true, state: .playing, position: 80, trackID: "spotify:track:old")
-        func started(_ what: P.What, _ now: SpotifyStatus, from before: SpotifyStatus = old, after elapsed: Double = 1) -> Bool {
+        let old = PlayerStatus(running: true, state: .playing, position: 80, trackID: "spotify:track:old")
+        func started(_ what: P.What, _ now: PlayerStatus, from before: PlayerStatus = old, after elapsed: Double = 1) -> Bool {
             P.didStart(what, before: before, beforePosition: before.position, now: now, position: now.position, elapsed: elapsed)
         }
         var moved = old

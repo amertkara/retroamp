@@ -36,7 +36,7 @@ final class Playback {
 
     enum Method: String { case webAPI = "the Web API", cli = "spotify_cli", appleScript = "AppleScript" }
 
-    private unowned let spotify: SpotifyBridge
+    private unowned let spotify: PlayerBridge
     weak var api: SpotifyWebAPI?
     let focus = FocusGuard()
     /// Marquee text and how long to show it.
@@ -49,7 +49,7 @@ final class Playback {
     private var frontAtLaunch: NSRunningApplication?
     private var problem: String?                // why an attempt failed, for the marquee
 
-    init(spotify: SpotifyBridge) { self.spotify = spotify }
+    init(spotify: PlayerBridge) { self.spotify = spotify }
 
     /// Starts `what`, replacing a start that's still under way. `done` learns whether it played.
     func start(_ what: What, done: ((Bool) -> Void)? = nil) {
@@ -204,7 +204,7 @@ final class Playback {
     // MARK: Checking that it worked
 
     /// Polls Spotify after a command until it reports the change, for up to `timeout` seconds.
-    private func started(_ what: What, before: SpotifyStatus, beforePosition: Double, sentAt: TimeInterval,
+    private func started(_ what: What, before: PlayerStatus, beforePosition: Double, sentAt: TimeInterval,
                          timeout: TimeInterval = 3.5) async -> Bool {
         while AppDelegate.now - sentAt < timeout {
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -218,7 +218,7 @@ final class Playback {
     }
 
     /// Whether Spotify's state shows that `what` started.
-    static func didStart(_ what: What, before: SpotifyStatus, beforePosition: Double, now: SpotifyStatus,
+    static func didStart(_ what: What, before: PlayerStatus, beforePosition: Double, now: PlayerStatus,
                          position: Double, elapsed: Double) -> Bool {
         guard now.running, now.state == .playing, !now.trackID.isEmpty else { return false }
         if now.trackID != before.trackID { return true }
@@ -300,7 +300,7 @@ final class Playback {
         case .item(let u), .track(let u, _, _): uri = u
         case .dj: uri = SpotifyLink.djURI
         }
-        guard let safe = SpotifyBridge.sanitized(uri) else { return false }
+        guard let safe = SpotifyLink.sanitized(uri) else { return false }
         guard let out = await SpotifyCLI.run(["play", safe]) else {
             problem = problem ?? "spotify_cli didn't answer"
             return false
@@ -340,7 +340,7 @@ enum SpotifyCLI {
     }
 
     @MainActor static var url: URL? {
-        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: SpotifyBridge.bundleID) else { return nil }
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Backend.spotify.bundleID) else { return nil }
         let tool = app.appendingPathComponent("Contents/MacOS/spotify_cli")
         return FileManager.default.isExecutableFile(atPath: tool.path) ? tool : nil
     }
@@ -487,7 +487,7 @@ final class FocusGuard: NSObject {
     }
 
     private static var spotifyApp: NSRunningApplication? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: SpotifyBridge.bundleID).first
+        NSRunningApplication.runningApplications(withBundleIdentifier: Backend.spotify.bundleID).first
     }
 
     private func extend(by seconds: TimeInterval) -> Bool {

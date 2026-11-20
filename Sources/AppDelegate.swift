@@ -1,9 +1,13 @@
 import AppKit
 
-/// Owns the window, timers and state, and wires Spotify, the audio tap and the renderer together.
+/// Owns the window, timers and state, and wires the player app, the audio tap and the renderer together.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
-    let spotify = SpotifyBridge()
+    let spotify = PlayerBridge(.spotify)
+    let music = PlayerBridge(.music)
+    /// The app Retroamp controls: Spotify (the default) or Music.
+    var backend = Backend.spotify
+    var player: PlayerBridge { backend == .music ? music : spotify }
     let analyzer = Analyzer()
     private(set) lazy var tap = AudioTap(analyzer: analyzer)
     /// Starts tracks, playlists and DJ without bringing Spotify's window forward.
@@ -31,8 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var pendingVolume: Int?         // scroll-wheel/arrow volume waiting to be sent
     var positionOverride: Double?   // 0…1 while dragging the position bar
     var lastVolumeSent: TimeInterval = 0
-    var spotifyAppRunning = false
-    var spotifyInstalled = true
+    var playerAppRunning = false
+    var playerInstalled = true
     private var marqueeOffset = 0
     private var marqueeStepAt: TimeInterval = 0
     private var lastMarqueeText = ""
@@ -49,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         static let skinPath = "skinPath", alwaysOnTop = "alwaysOnTop", scale = "windowScale"
         static let legacyDoubleSize = "doubleSize"  // v0.1–0.2 opened at 2× by default
         static let visMode = "visMode", timeRemaining = "timeRemaining", windowTopLeft = "windowTopLeft"
-        static let skinChoice = "skinChoice"
+        static let skinChoice = "skinChoice", backend = "backend"
     }
 
     enum SkinChoice: String { case classic, builtin, file }
@@ -66,13 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         playlist = PlaylistController(app: self)
         playlist.setUp()
 
-        spotify.onMessage = { [weak self] text in self?.show(text, seconds: 5) }
+        for p in [spotify, music] {
+            p.onMessage = { [weak self] text in self?.show(text, seconds: 5) }
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: #selector(playerChanged(_:)), name: NSNotification.Name(p.backend.notification),
+                object: nil, suspensionBehavior: .deliverImmediately)
+        }
         playback.api = playlist.api
         playback.onMessage = { [weak self] text, seconds in self?.show(text, seconds: seconds) }
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(spotifyChanged(_:)),
-            name: NSNotification.Name("com.spotify.client.PlaybackStateChanged"), object: nil,
-            suspensionBehavior: .deliverImmediately)
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         ws.addObserver(self, selector: #selector(appsChanged(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
@@ -148,22 +153,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func pollTick() {
-        spotifyAppRunning = spotify.isRunning
-        spotifyInstalled = spotify.isInstalled
-        spotify.poll()
-        tap.maintain(spotifyRunning: spotifyAppRunning)
+        playerAppRunning = player.isRunning
+        playerInstalled = player.isInstalled
+        player.poll()
+        tap.maintain(running: playerAppRunning, bundleID: backend.bundleID)
         checkVisualizerPermission()
         playlist?.poll()
     }
 
-    @objc private func spotifyChanged(_ n: Notification) {
-        if let info = n.userInfo { spotify.apply(notification: info) }
-        spotify.refreshSoon()
+    @objc private func playerChanged(_ n: Notification) {
+        guard n.name.rawValue == backend.notification else { return }
+        if let info = n.userInfo { player.apply(notification: info) }
+        player.refreshSoon()
     }
 
     @objc private func appsChanged(_ n: Notification) {
         let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        guard app?.bundleIdentifier == SpotifyBridge.bundleID else { return }
+        guard app?.bundleIdentifier == backend.bundleID else { return }
         perform(#selector(pollTick), with: nil, afterDelay: 0.5)
     }
 
@@ -176,8 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let code = AudioTap.fourCC(err).map { "'\($0)'" } ?? String(err)
             show("THE VISUALIZER CAN'T START: CORE AUDIO ERROR \(code)", seconds: 12)
         }
-        // Spotify must be playing here, not on another Connect device, and the tap running.
-        guard tap.status == .running, tap.spotifyOutputActive, spotify.status.state == .playing else {
+        // The app must be playing here (not on another Spotify Connect device), and the tap running.
+        guard tap.status == .running, tap.outputActive, player.status.state == .playing else {
             playingSince = nil
             return
         }
@@ -199,14 +205,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func marqueeText(now: TimeInterval) -> String {
         if let m = message, now < messageUntil { return m }
         message = nil
-        let st = spotify.status
+        let st = player.status
+        let name = backend.displayName.uppercased()
         if !st.running {
-            if spotifyAppRunning {
-                return spotify.automationDenied ? "RETROAMP NEEDS PERMISSION TO CONTROL SPOTIFY" : "CONNECTING TO SPOTIFY..."
+            if playerAppRunning {
+                return player.automationDenied ? "RETROAMP NEEDS PERMISSION TO CONTROL \(backend.appName.uppercased())" : "CONNECTING TO \(name)..."
             }
-            return spotifyInstalled ? "SPOTIFY IS NOT RUNNING - PRESS PLAY TO START IT" : "SPOTIFY IS NOT INSTALLED"
+            return playerInstalled ? "\(name) IS NOT RUNNING - PRESS PLAY TO START IT" : "\(name) IS NOT INSTALLED"
         }
-        guard !st.name.isEmpty else { return "SPOTIFY - NOTHING PLAYING" }
+        guard !st.name.isEmpty else { return "\(name) - NOTHING PLAYING" }
         let artist = st.artist.isEmpty ? "" : "\(st.artist) - "
         let length = st.duration > 0 ? " (\(Self.format(st.duration)))" : ""
         return "\(artist)\(st.name)\(length)"
@@ -219,10 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func renderFrame() -> CGImage? {
         let now = Self.now
-        let st = spotify.status
+        let st = player.status
         var s = RenderState()
         s.playback = st.running ? st.state : .stopped
-        s.elapsed = spotify.position
+        s.elapsed = player.position
         s.duration = st.duration
         s.volume = volumeOverride ?? pendingVolume ?? st.volume
         s.balance = balance
@@ -348,6 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         visMode = VisMode(rawValue: d.integer(forKey: Keys.visMode)) ?? .bars
         timeRemaining = d.bool(forKey: Keys.timeRemaining)
+        backend = d.string(forKey: Keys.backend).flatMap(Backend.init(rawValue:)) ?? .spotify
         let path = d.string(forKey: Keys.skinPath)
         skinChoice = d.string(forKey: Keys.skinChoice).flatMap(SkinChoice.init(rawValue:)) ?? (path == nil ? .classic : .file)
         switch skinChoice {
@@ -368,6 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         d.set(visMode.rawValue, forKey: Keys.visMode)
         d.set(timeRemaining, forKey: Keys.timeRemaining)
         d.set(skinChoice.rawValue, forKey: Keys.skinChoice)
+        d.set(backend.rawValue, forKey: Keys.backend)
         if let w = window { d.set(NSStringFromPoint(NSPoint(x: w.frame.minX, y: w.frame.maxY)), forKey: Keys.windowTopLeft) }
     }
 }

@@ -6,23 +6,24 @@ extension AppDelegate {
     // MARK: Buttons
 
     func clicked(_ c: Control) {
-        let st = spotify.status
+        let player = self.player
+        let st = player.status
         switch c {
         case .play:
-            if !spotifyAppRunning { spotify.launch(thenPlay: true) }
-            else if st.state == .playing { spotify.seek(to: 0) }  // classic: Play restarts the track
-            else { spotify.play() }
+            if !playerAppRunning { player.launch(thenPlay: true) }
+            else if st.state == .playing { player.seek(to: 0) }  // classic: Play restarts the track
+            else { player.play() }
         case .pause:
-            if st.state == .playing { spotify.pause() } else if st.state == .paused { spotify.play() }
-        case .stop: spotify.stop()
-        case .next: spotify.next()
-        case .prev: spotify.previous()
-        case .eject: promptForLink()
+            if st.state == .playing { player.pause() } else if st.state == .paused { player.play() }
+        case .stop: player.stop()
+        case .next: player.next()
+        case .prev: player.previous()
+        case .eject: if backend == .music { playlist.open(.library) } else { promptForLink() }
         case .shuffle:
-            spotify.setShuffle(!st.shuffle)
+            player.setShuffle(!st.shuffle)
             show("SHUFFLE: \(st.shuffle ? "OFF" : "ON")")
         case .repeatButton:
-            spotify.setRepeat(!st.repeating)
+            player.setRepeat(!st.repeating)
             show("REPEAT: \(st.repeating ? "OFF" : "ON")")
         case .visualizer, .clutterV: cycleVisualizer()
         case .time: toggleTimeRemaining()
@@ -35,18 +36,29 @@ extension AppDelegate {
         case .minimize: window.miniaturize(nil)
         case .close: NSApp.terminate(nil)
         case .shade: show("WINDOWSHADE MODE: COMING SOON")
-        case .eq: show("EQUALIZER: NOT AVAILABLE FOR SPOTIFY")
+        case .eq: show("EQUALIZER: NOT AVAILABLE FOR \(backend.displayName.uppercased())")
         case .pl: playlist.toggle()
-        case .logo: playDJ()
+        case .logo: if backend == .spotify { playDJ() }
         case .marquee, .volume, .balance, .position: break
         }
     }
 
     func togglePlayPause() {
-        if spotifyAppRunning { spotify.playPause() } else { spotify.launch(thenPlay: true) }
+        if playerAppRunning { player.playPause() } else { player.launch(thenPlay: true) }
     }
 
     func marqueeDoubleClicked() { showSpotify() }
+
+    /// Switches between Spotify and Music.
+    @objc func selectBackend(_ item: NSMenuItem) {
+        let new: Backend = item.tag == 1 ? .music : .spotify
+        guard new != backend else { return }
+        backend = new
+        savePreferences()
+        playlist.backendChanged()
+        pollTick()
+        show("PLAYER: \(new.displayName.uppercased())", seconds: 2)
+    }
 
     // MARK: Sliders
 
@@ -62,7 +74,7 @@ extension AppDelegate {
             let now = Self.now
             if phase == .ended || now - lastVolumeSent > 0.08 {
                 lastVolumeSent = now
-                spotify.setVolume(vol)
+                player.setVolume(vol)
             }
         case .balance:
             var b = Int((fraction(Layout.balanceSlider) * 200 - 100).rounded())
@@ -71,12 +83,12 @@ extension AppDelegate {
             show(phase == .ended ? "BALANCE: NOT AVAILABLE FOR SPOTIFY"
                  : b == 0 ? "BALANCE: CENTER" : "BALANCE: \(abs(b))% \(b < 0 ? "LEFT" : "RIGHT")", seconds: 1.2)
         case .position:
-            let dur = spotify.status.duration
-            guard spotify.status.running, dur > 0 else { positionOverride = nil; return }
+            let dur = player.status.duration
+            guard player.status.running, dur > 0 else { positionOverride = nil; return }
             let f = fraction(Layout.positionSlider)
             if phase == .ended {
                 positionOverride = nil
-                spotify.seek(to: f * dur)
+                player.seek(to: f * dur)
             } else {
                 positionOverride = f
                 show("SEEK TO: \(Self.format(f * dur))/\(Self.format(dur)) (\(Int(f * 100))%)", seconds: 1)
@@ -86,7 +98,7 @@ extension AppDelegate {
     }
 
     func nudgeVolume(by delta: Int) {
-        let v = max(0, min(100, (pendingVolume ?? spotify.status.volume) + delta))
+        let v = max(0, min(100, (pendingVolume ?? player.status.volume) + delta))
         pendingVolume = v
         show("VOLUME: \(v)%", seconds: 1)
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(sendPendingVolume), object: nil)
@@ -95,15 +107,15 @@ extension AppDelegate {
 
     @objc func sendPendingVolume() {
         guard let v = pendingVolume else { return }
-        spotify.setVolume(v)
+        player.setVolume(v)
         pendingVolume = nil
     }
 
     func seek(by seconds: Double) {
-        let dur = spotify.status.duration
-        guard spotify.status.running, dur > 0 else { return }
-        let target = max(0, min(dur - 1, spotify.position + seconds))
-        spotify.seek(to: target)
+        let dur = player.status.duration
+        guard player.status.running, dur > 0 else { return }
+        let target = max(0, min(dur - 1, player.position + seconds))
+        player.seek(to: target)
         show("SEEK TO: \(Self.format(target))/\(Self.format(dur))", seconds: 1)
     }
 
@@ -179,9 +191,10 @@ extension AppDelegate {
         }
     }
 
+    /// Brings the player app forward (Spotify or Music).
     @objc func showSpotify() {
         playback.focus.disarm()  // asked for, so don't send it back
-        spotify.activate()
+        player.activate()
     }
 
     func handleDrop(urls: [URL], strings: [String]) -> Bool {
@@ -275,6 +288,9 @@ extension AppDelegate {
         skinsItem.submenu = skins
         m.addItem(skinsItem)
         m.addItem(.separator())
+        add("Use Spotify", #selector(selectBackend(_:)), tag: 0)
+        add("Use Apple Music", #selector(selectBackend(_:)), tag: 1)
+        m.addItem(.separator())
         add("Play Spotify Link…", #selector(promptForLink), "l")
         add("Play Spotify DJ", #selector(playDJ), "j")
         add("Copy Track Link", #selector(copyTrackLink))
@@ -324,9 +340,13 @@ extension AppDelegate {
         case #selector(useBuiltInSkin): item.state = skin.isBuiltIn ? .on : .off
         case #selector(useClassicSkin): item.state = skinChoice == .classic && !skin.isBuiltIn ? .on : .off
         case #selector(togglePlaylist): item.state = playlist?.isVisible == true ? .on : .off
+        case #selector(selectBackend(_:)): item.state = item.tag == (backend == .music ? 1 : 0) ? .on : .off
         case #selector(toggleSpotifyConnection):
             item.title = playlist?.connectionMenuTitle ?? "Connect Spotify…"
-        case #selector(copyTrackLink): return !spotify.status.trackID.isEmpty
+            return backend == .spotify
+        case #selector(promptForLink), #selector(playDJ): return backend == .spotify
+        case #selector(showSpotify): item.title = "Show \(backend.appName)"
+        case #selector(copyTrackLink): return backend == .spotify && !spotify.status.trackID.isEmpty
         default: break
         }
         return true
